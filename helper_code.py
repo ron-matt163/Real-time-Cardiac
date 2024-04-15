@@ -4,30 +4,33 @@
 # These are helper functions that you can use with your code.
 
 import os, numpy as np
-import re, time
+import re, time, random
 import matplotlib.pyplot as plt
+import seaborn as sns
 import torch
 from biosppy.signals import ecg
 
-from sklearn.metrics import classification_report
+from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.preprocessing import MinMaxScaler
 from collections import Counter
 from sklearn.utils import resample
+from statistics import mean
 import pywt
 
 from scipy.interpolate import interp1d
-from scipy.signal import find_peaks, butter, filtfilt
+from scipy.signal import find_peaks, butter, filtfilt, resample
 
 import torch.nn.functional as F
-
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 from torch.utils.data import Dataset
+from config import config
 
 
 
 class ECGDataset(Dataset):
-    def __init__(self, features, labels):
+    def __init__(self, features, labels=None):
         """
         features: A list or array of cycle feature dictionaries (including 'id' and 'features').
         labels: A numpy array or list of labels corresponding to each cycle feature dictionary.
@@ -39,26 +42,27 @@ class ECGDataset(Dataset):
         return len(self.features)
 
     def __getitem__(self, idx):
-        feature_dict = self.features[idx]
+        # feature_dict = self.features[idx]
         # Assuming each feature in the dictionary is already a numpy array of the same length
         # or has been appropriately padded/processed before this point.
 
-        features = torch.tensor()
-        for i in feature_dict:
+        features = torch.tensor(self.features[idx], dtype=torch.float32)
+        # for i in feature_dict:
 
-            # Keeping intervals separate, consider each as a channel in a 1D CNN input
-            feature_tensor = torch.stack([
-                torch.tensor(i['features']['ecg_segment'], dtype=torch.float32),
-                torch.tensor(i['features']['rr_interval'], dtype=torch.float32),
-                torch.tensor(i['features']['pq_interval'], dtype=torch.float32),
-                torch.tensor(i['features']['qt_interval'], dtype=torch.float32),
-                torch.tensor(i['features']['pr_interval'], dtype=torch.float32),
-                torch.tensor(i['features']['st_interval'], dtype=torch.float32)
-            ], dim=0)  # This stacks the tensors along a new dimension, treat each interval as a separate channel
+        #     # Keeping intervals separate, consider each as a channel in a 1D CNN input
+        #     feature_tensor = torch.stack([
+        #         torch.tensor(i['features']['ecg_segment'], dtype=torch.float32),
+        #         torch.tensor(i['features']['rr_interval'], dtype=torch.float32),
+        #         torch.tensor(i['features']['pq_interval'], dtype=torch.float32),
+        #         torch.tensor(i['features']['qt_interval'], dtype=torch.float32),
+        #         torch.tensor(i['features']['pr_interval'], dtype=torch.float32),
+        #         torch.tensor(i['features']['st_interval'], dtype=torch.float32)
+        #     ], dim=0)  # This stacks the tensors along a new dimension, treat each interval as a separate channel
 
-            features = torch.cat((features, feature_tensor))
-
-        label = torch.tensor(self.labels[idx], dtype=torch.float32)
+        #     features = torch.cat((features, feature_tensor))
+        label = torch.empty((config.feature_size))
+        if self.labels is not None:
+            label = torch.tensor(self.labels[idx], dtype=torch.float32)
         return features, label
 
 
@@ -79,10 +83,93 @@ class PytorchExperimentLogger(object):
         with open(self.saveFile, 'a') as f:
             f.writelines(strT + '\n')
 
-
-
 exp_logger = PytorchExperimentLogger('./log', "log", ShowTerminal=True)
 
+def print_class_distribution(text, labels):
+    class_dist = {}
+    for item in labels:
+        if class_dist.get(str(item)):
+            class_dist[str(item)] += 1
+        else:
+            class_dist[str(item)] = 1
+    
+    print(text, class_dist)
+
+def normalize(data):
+    min_val = np.min(data)
+    max_val = np.max(data)
+    normalized_data = (data - min_val) / (max_val - min_val)
+    return normalized_data
+
+def save_confusion_matrix(y_true, y_pred, filename=None):
+    cm = confusion_matrix(y_true, y_pred)
+    print("Confusion matrix: \n", cm)
+    cm = np.array(cm)
+    # Define class labels
+    classes = ['NSR', 'Not NSR']
+    # Plot confusion matrix
+    plt.imshow(cm, interpolation='nearest', cmap=plt.cm.Blues)
+    plt.title('Confusion Matrix')
+    plt.colorbar()
+    tick_marks = np.arange(len(classes))
+    plt.xticks(tick_marks, classes)
+    plt.yticks(tick_marks, classes)
+    # Print numbers on the plot
+    thresh = cm.max() / 2.
+    for i in range(cm.shape[0]):
+        for j in range(cm.shape[1]):
+            plt.text(j, i, format(cm[i, j], 'd'),
+                    horizontalalignment="center",
+                    color="white" if cm[i, j] > thresh else "black")
+    plt.ylabel('True label')
+    plt.xlabel('Predicted label')
+    plt.tight_layout()
+    if filename is None:
+        filename = "confmatr.png"
+    plt.savefig("Confmatr/"+filename)
+    plt.close()
+
+
+def plot_autoencoder_losses(losses, epoch=0, filename=None):
+    sns.displot(losses, bins=50, kde=True)
+    if filename is None:
+        filename = f"autoencoder_loss_epoch{epoch}.png"
+        # When the entire training set is used to test the trained model, epoch = -1 is passed
+        if epoch == -1:
+            filename = "TRAIN" + filename
+    plt.savefig("Lossgraph/" + filename)
+    plt.close()
+# 
+def plot_ecg_cycles_histogram(cycles_in_recordings):
+    # Define bins
+    bins = [0, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36, 39, 42, 45, 48, 51, 100]
+
+    plt.hist(cycles_in_recordings, bins=bins, edgecolor='black')
+    plt.xlabel('Value')
+    plt.ylabel('Frequency')
+    plt.title('Histogram of ECG Cycle Count')
+
+    # Annotate bin values
+    for i in range(len(bins)-1):
+        plt.text((bins[i]), plt.hist(cycles_in_recordings, bins=bins, edgecolor='black')[0][i] + 100, str(bins[i]) + '-' + str(bins[i+1]), fontsize=6)
+    plt.savefig("EDA/cycles_per_fig_histogram.png")
+    plt.close()
+
+# Get the Kurtosis Signal Quality Index (kSQI) value for the signal 
+def get_ksqi(ecg_signal):
+    # number of samples
+    n = len(ecg_signal)
+    mu = mean(ecg_signal)
+
+    # dev_4 = sigma((xi - mu)^4), dev_2 = sigma((xi - mu)^2)
+    dev_4 = 0
+    dev_2 = 0
+    for i in range(n):
+        dev_4 += (ecg_signal[i] - mu) ** 4
+        dev_2 += (ecg_signal[i] - mu) ** 2
+
+    ksqi = float(n*dev_4)/float(dev_2**2 + 1e-30) - 3
+    return ksqi
 
 
 def extract_features_per_cycle(ecg_signal, r_peaks, q_peaks, s_peaks, p_peaks, t_peaks, sampling_rate, id):
@@ -90,59 +177,62 @@ def extract_features_per_cycle(ecg_signal, r_peaks, q_peaks, s_peaks, p_peaks, t
     Extract detailed ECG features for each cycle, including raw segments, amplitudes,
     intervals, HRV metrics (SDNN, RMSSD), heart rate, and kSQI.
     """
-    print(f"ECG signal for id: {id}, {ecg_signal}")
     cnt = 0
+    total_samples = 0
+    cycles_per_window = 1
     cycle_data_list = []
-    for i in range(len(p_peaks)):
+    rr_time_intervals = []
+    pq_time_intervals = []
+    qt_time_intervals = []
+    pr_time_intervals = []
+    st_time_intervals = []
+    ecg_cycle_samples = []
+    ecg_segments = []
+    undersized_list = False
+    # for i in range(len(p_peaks)):
 
-        # print(i, " / ", len(p_peaks))
-
-        if i >= len(q_peaks) or i >= len(r_peaks) or i >= len(s_peaks) or i >= len(t_peaks):
-            cnt += 1
-            continue
-
-        if i == len(p_peaks) - 1:
-            ecg_segment = resample_template(ecg_signal[p_peaks[i]: -1], 50)
-            rr_interval = resample_template(ecg_signal[r_peaks[i]: -1], 50)
-        else:
-            ecg_segment = resample_template(ecg_signal[p_peaks[i]: p_peaks[i+1]], 50)
-            rr_interval = resample_template(ecg_signal[r_peaks[i]: r_peaks[i+1]], 50)
-
-        pq_interval = resample_template(ecg_signal[p_peaks[i]: q_peaks[i]], 50)
-        qt_interval = resample_template(ecg_signal[q_peaks[i]: t_peaks[i]], 50)
-        pr_interval = resample_template(ecg_signal[p_peaks[i]: r_peaks[i]], 50)
-        st_interval = resample_template(ecg_signal[s_peaks[i]: t_peaks[i]], 50)
-
-        # p_amp = np.full(50, ecg_signal[p_peaks[i]])
-        # q_amp = np.full(50, ecg_signal[q_peaks[i]])
-        # r_amp = np.full(50, ecg_signal[r_peaks[i]])
-        # s_amp = np.full(50, ecg_signal[s_peaks[i]])
-        # t_amp = np.full(50, ecg_signal[t_peaks[i]])
-        if len(ecg_segment) != 50 or len(rr_interval) != 50 or len(pq_interval) != 50 or len(qt_interval) != 50 or len(pr_interval) != 50 or len(st_interval) != 50:
-            print(f"LENGTH INCONSISTENCY! for id = {id}: ecgs {len(ecg_segment)}, rr_interval {len(rr_interval)}, pq {len(pq_interval)}, qt {len(qt_interval)}, pr {len(pr_interval)} st {len(st_interval)}")
-        # print(np.array([ecg_segment, rr_interval, pq_interval, qt_interval, pr_interval, st_interval]).shape)
-
-        # Bundle each cycle's features and id into a dictionary
-        cycle_features = {
-            # 'id': id,
-            'features': {
-                'ecg_segment': ecg_segment,
-                'rr_interval': rr_interval,
-                'pq_interval': pq_interval,
-                'qt_interval': qt_interval,
-                'pr_interval': pr_interval,
-                'st_interval': st_interval
-                # 'p_amp': p_amp,
-                # 'q_amp': q_amp,
-                # 'r_amp': r_amp,
-                # 's_amp': s_amp,
-                # 't_amp': t_amp
-            }
-        }
-
-        cycle_data_list.append(cycle_features)
-
-    return cycle_data_list, cnt
+    if len(r_peaks) >= 2:
+        i = 0
+        while i < len(r_peaks)-cycles_per_window:
+            total_samples += len(ecg_signal[r_peaks[i]: r_peaks[i+cycles_per_window]])
+            ecg_segment = normalize(resample_template(ecg_signal[r_peaks[i]: r_peaks[i+cycles_per_window]], config.feature_size))
+            if not np.isnan(ecg_segment).any():
+                ecg_segments.append(ecg_segment)
+            if i >= len(p_peaks) or i >= len(q_peaks) or i >= len(s_peaks) or i >= len(t_peaks):
+                # possible error in defining peaks
+                cnt += 1
+            # update
+            i += cycles_per_window
+                    
+        # Checks if it is worth considering the case where i < len(r_peaks) but i > len(r_peaks)-cycles_per_window
+        # This actually might be worth considering for larger window sizes
+        cycles_to_complete_segment = len(ecg_segments)%cycles_per_window
+        if cycles_to_complete_segment != 0:
+            total_samples += len(ecg_signal[r_peaks[i]: r_peaks[-1]])
+            rr_interval = r_peaks[-1] - r_peaks[-2]
+            # Padding the remained portion of the final ECG signal with zeroes
+            final_ecg_segment = ecg_signal[r_peaks[i]: r_peaks[-1]] + [0]*rr_interval*cycles_to_complete_segment
+            final_ecg_segment = normalize(resample_template(final_ecg_segment, config.feature_size))
+            if not np.isnan(final_ecg_segment).any():
+                ecg_segments.append(final_ecg_segment)
+            if i >= len(p_peaks) or i >= len(q_peaks) or i >= len(s_peaks) or i >= len(t_peaks):
+                # possible error in defining peaks
+                cnt += 1
+    
+        # for i in range(len(r_peaks)-1):
+        #     total_samples += len(ecg_signal[r_peaks[i]: r_peaks[i+1]])
+        #     ecg_segment = normalize(resample_template(ecg_signal[r_peaks[i]: r_peaks[i+1]], config.feature_size))
+        #     if not np.isnan(ecg_segment).any():
+        #         ecg_cycle_samples.append(ecg_segment)
+        #     if i >= len(p_peaks) or i >= len(q_peaks) or i >= len(s_peaks) or i >= len(t_peaks):
+        #         # possible error in defining peaks
+        #         cnt += 1
+        if len(ecg_segments) == 0:
+            undersized_list = True 
+        # print(f"ECG signal for id: {id}, {ecg_cycle_samples}")
+    else:
+        undersized_list = True
+    return np.array(ecg_segments), cnt, total_samples, undersized_list
 
 
 
@@ -150,7 +240,8 @@ def process_ecg(recording, frequency, id):
 
     lead_one = dwt_denoise(recording[0])
     r_peaks, q_peaks, s_peaks, p_peaks, t_peaks = hamilton_detector_with_qs_pt(lead_one, frequency)
-    print(f"P peaks: {p_peaks}, Q peaks: {q_peaks}, R peaks: {r_peaks}, S peaks: {s_peaks}, T peaks: {t_peaks}")
+    cycles_in_recording = len(r_peaks)-1
+    print(f"Process ECG P peaks: {len(p_peaks)}, Q peaks: {len(q_peaks)}, R peaks: {len(r_peaks)}, S peaks: {len(s_peaks)}, T peaks: {len(t_peaks)}")
 
     # plt.figure(figsize=(10, 6))
     # plt.plot(lead_one, label=f'ECG Lead One', color='black')
@@ -168,9 +259,10 @@ def process_ecg(recording, frequency, id):
     # plt.ylabel('Amplitude')
     # plt.show()
 
-    features, cnt = extract_features_per_cycle(lead_one, r_peaks, q_peaks, s_peaks, p_peaks, t_peaks, frequency, id)
+    features, cnt, total_samples, undersized_list = extract_features_per_cycle(lead_one, r_peaks, q_peaks, s_peaks, p_peaks, t_peaks, frequency, id)
 
-    return features, cnt
+    # return features, cnt, undersized_list, cycles_in_recording
+    return features, cnt, undersized_list, cycles_in_recording, total_samples
 
 
 # Check if a variable is a number or represents a number.
@@ -717,11 +809,23 @@ def resample_template(template, target_length=300):
     # Use the interpolation function to get data at new indices
     resampled_template = interpolation_function(new_indices)
 
-
-    # if resampled_template.ndim == 1:
-    #     return resampled_template.tolist()
-
     return resampled_template
+
+# Resamples signals with a given frequency to the required output frequency
+def frequency_resample(template, ip_frequency, op_frequency=500, method="lin_interpolation"):
+    target_sample_length = int(len(template) * (float(op_frequency)/ip_frequency))
+    if method == "lin_interpolation":
+        op_template = resample_template(template, target_sample_length)
+    else:
+        op_template = np.array(resample(template, target_sample_length))
+
+    if len(op_template) < config.ip_sample_length:
+        op_template = np.pad(op_template, (0, config.ip_sample_length - len(op_template)))
+    else:
+        start_index = random.randint(0, len(op_template)-config.ip_sample_length-1)
+        op_template = op_template[start_index: start_index + config.ip_sample_length]
+    
+    return op_template
 
 
 def one_hot_encode_2d_list(data, threshold=0.5):

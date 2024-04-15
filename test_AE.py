@@ -4,14 +4,12 @@ from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
 from helper_code import *
-from sklearn.metrics import accuracy_score, f1_score, classification_report, confusion_matrix
+from sklearn.metrics import accuracy_score, f1_score, classification_report
 # from cuml import SVC  # For SVM
 from joblib import dump, load
 
 from sklearn.preprocessing import LabelEncoder
-from imblearn.over_sampling import SMOTE
-from imblearn.under_sampling import EditedNearestNeighbours, OneSidedSelection, RandomUnderSampler
-from imblearn.combine import SMOTEENN
+from imblearn.over_sampling import SMOTE, ADASYN
 from collections import Counter
 from sklearn.model_selection import KFold, GridSearchCV
 import torch.nn.functional as F
@@ -50,120 +48,6 @@ map_class = [['733534002', '164909002'],
 map1_class = ['733534002', '713427006', '284470004', '427172004']
 map2_class = ['164909002', '59118001', '63593006', '17338001']
 
-
-def train_and_cross_validate_classifier(aggregated_features, aggregated_labels, num_epochs):
-    # Combining undersampling the majority and applying SMOTE on the minority to make up for the class imbalance 
-    # print("SMOTE-ENN")
-    # start_time = time.time()
-    # smote_enn = SMOTEENN(enn=EditedNearestNeighbours(sampling_strategy='majority'))
-    # print("Time taken for SMOTE-ENN: ", time.time() - start_time)
-    # print_class_distribution("Before OSS: ", aggregated_labels)    
-    # oss = OneSidedSelection(n_neighbors=3, sampling_strategy='majority')
-    # aggregated_features, aggregated_labels = oss.fit_resample(aggregated_features, aggregated_labels)
-    # print("Time taken for OSS: ", time.time()-start_time)
-    # print_class_distribution("After OSS: ", aggregated_labels)    
-    # aggregated_features, aggregated_labels = smote_enn.fit_resample(aggregated_features, aggregated_labels)
-    # print_class_distribution("After SMOTE-ENN: ", aggregated_labels)
-    # smote_fit_resample appears to change the input from 2d to 1d, changing it back here
-    # rus = RandomUnderSampler(random_state=42)
-    # aggregated_features, aggregated_labels = rus.fit_resample(aggregated_features, aggregated_labels)
-    # print_class_distribution("After RUS: ", aggregated_labels)
-    aggregated_labels = aggregated_labels.reshape(-1, 1)
-    # Shuffle the dataset
-    dataset = np.column_stack((aggregated_features, aggregated_labels))
-    np.random.shuffle(dataset)
-
-    aggregated_features, aggregated_labels = dataset[:, :-1],  dataset[:, -1]
-    aggregated_labels = aggregated_labels.reshape(-1, 1)
-
-    np.save('npy/aggregated_features.npy', aggregated_features)
-    np.save('npy/aggregated_labels.npy', aggregated_labels)
-    # np.save('npy/scored_indices.npy', scored_indices)
-
-    aggregated_features = np.load('npy/aggregated_features.npy', allow_pickle=True)
-    aggregated_labels = np.load('npy/aggregated_labels.npy', allow_pickle=True)
-    # scored_indices = np.load('npy/scored_indices.npy', allow_pickle=True)
-
-    # Cross-validation
-    kf = KFold(n_splits=5, shuffle=True, random_state=42)
-
-    iteration = 5
-    fold = 1
-    # Model training
-    for train_index, test_index in kf.split(aggregated_features):
-        one_count, zero_count  = 0, 0
-
-        exp_logger.print(f"Starting Fold {fold}")
-        # X_train, X_test, y_train, y_test = train_test_split(aggregated_features, aggregated_labels, test_size=0.5, random_state=1234+idx)
-        X_train, X_test = aggregated_features[train_index], aggregated_features[test_index]
-        y_train, y_test = aggregated_labels[train_index], aggregated_labels[test_index]
-
-        for item in y_train:
-            if float(item) == 1.0:
-                one_count += 1
-            else:
-                zero_count += 1
-
-        # weight = torch.tensor([float(len(y_train))/(2*one_count)], dtype=torch.float32)
-        weight = torch.tensor([float(zero_count)/len(y_train)], dtype=torch.float32)
-        print("Pos weight: ", weight)
-        # # Convert to PyTorch tensors
-        # X_train_tensor = torch.tensor(X_train, dtype=torch.float32)
-        # y_train_tensor = torch.tensor(y_train, dtype=torch.float32)
-        # X_test_tensor = torch.tensor(X_test, dtype=torch.float32)
-        # y_test_tensor = torch.tensor(y_test, dtype=torch.float32)
-
-        # Create custom datasets
-        train_dataset = ECGDataset(X_train, y_train)
-        test_dataset = ECGDataset(X_test, y_test)
-
-        # Create data loaders
-        train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-        test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
-
-        # Initialize the model
-        teacher_model = CNNLSTM1DWithAttentionTeacher().to(device)
-        # student_model = CNNLSTM1DWithAttentionStudent(num_classes=129).to(device)
-
-        # exp_logger.print("Training the teacher model...")
-        print("Training the teacher model")
-        model_path = f'{model_directory}/time_ecg{fold}_lead2.pth'
-        train_model(teacher_model, train_loader, weight, num_epochs, model_path)
-
-        # # Load the saved model state into the teacher_model instance
-        teacher_model.load_state_dict(torch.load(model_path, map_location=device))
-
-        exp_logger.print("Testing the teacher model...")
-        test_model(teacher_model, test_loader, fold)
-        # Save the teacher model's state
-        torch.save(teacher_model.state_dict(), model_path)
-
-
-
-        # Prepare for knowledge distillation
-        # exp_logger.print("Training the student model with knowledge distillation...")
-        # train_student_model_with_distillation(teacher_model,
-        #                                         student_model,
-        #                                         train_loader,
-        #                                         device,
-        #                                         num_epochs=num_epochs,
-        #                                         temperature=2.0,
-        #                                         alpha=0.5,
-        #                                         weights=weights,
-        #                                         scored_indices=scored_indices)
-
-        # exp_logger.print("Testing the student model...")
-        # model_path = f'{model_directory}/student_model.pth'
-
-        # # Load the saved model state into the teacher_model instance
-        # student_model.load_state_dict(torch.load(model_path, map_location=device))
-        # test_model(student_model, test_loader, scored_indices)
-        # # Optionally save the student model's state
-        # torch.save(student_model.state_dict(), f'{model_directory}/student_model.pth')
-
-
-        fold += 1
-
 # Restructure the dataset such that a single ECG cycle forms an input of the model rather that an entire ECG recording
 # We don't consider rows that are assigned multiple classes if sinus rhythm is one of those multiple classes.
 def split_records_per_cycle(aggregated_features, record_labels):
@@ -190,14 +74,12 @@ def split_records_per_cycle(aggregated_features, record_labels):
         else:
             if len(labels) == 1:
                 for cycle_features in record_features:
-
                     new_features.append(np.array(cycle_features))
                     new_aggregated_labels.append(0.0)
                     clear_NSR_features.append(np.array(cycle_features))         
 
             else:
                 for cycle_features in record_features:
-
                     unclear_NSR_features.append(np.array(cycle_features))
                 uncertain_SR_count += 1
         time_spent.append(time.time() - start_time)
@@ -207,108 +89,6 @@ def split_records_per_cycle(aggregated_features, record_labels):
     print(f"SHAPES: new_features: {np.array(new_features).shape}, new_aggregated_labels: {np.array(new_aggregated_labels).shape}, clear_NSR_features: {np.array(clear_NSR_features).shape}, unclear_NSR_features: {np.array(unclear_NSR_features).shape}")
     return np.array(new_features), np.array(new_aggregated_labels), np.array(clear_NSR_features), np.array(unclear_NSR_features), time_spent
         
-# Takes a list of cycles that are surely NSR cycles (clear_NSR_features) and a list of cycles that may not
-# be NSR cycles (unclear_NSR_features) as input and returns a trained autoencoder model
-def sinus_rhythm_autoencoder(clear_NSR_features, unclear_NSR_features, model_directory):
-    # Autoencoder cross validation: MOVE INSIDE A FN TO GENERALIZE IT FOR DIFFERENT MODELS
-    # for train_index, test_index in kf.split(clear_NSR_features):
-
-    # exp_logger.print(f"Starting Fold {fold}")
-    # X_train, X_test, y_train, y_test = train_test_split(aggregated_features, aggregated_labels, test_size=0.5, random_state=1234+idx)
-    X_train, X_test = clear_NSR_features, unclear_NSR_features
-    # y_train, y_test = aggregated_labels[train_index], aggregated_labels[test_index]
-
-    # Create custom datasets
-    train_dataset = ECGDataset(X_train)
-    test_dataset = ECGDataset(X_test)
-
-    # Create data loaders
-    train_loader = DataLoader(train_dataset, batch_size=1, shuffle=True)
-    test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
-
-    # Initialize the model
-    autoencoder_model = RecurrentAutoencoder(config.feature_size, config.autoencoder_embedding_size).to(device)
-    # student_model = CNNLSTM1DWithAttentionStudent(num_classes=129).to(device)
-
-    # exp_logger.print("Training the teacher model...")
-    print("Training the autoencoder model")
-    model_path = f'{model_directory}/autoencoder_model200feat_lead2.pth'
-    train_autoencoder_model(autoencoder_model, train_loader, 20, model_path)
-
-    # # Load the saved model state into the teacher_model instance
-    autoencoder_model.load_state_dict(torch.load(model_path, map_location=device))
-
-    exp_logger.print("Testing the autoencoder model...")
-    test_autoencoder_model(autoencoder_model, test_loader)
-    # Save the teacher model's state
-    torch.save(autoencoder_model.state_dict(), model_path)
-
-    print("EXITING AFTER TRAINING AUTOENCODER")
-    return autoencoder_model, model_path
-
-
-def classify_unclear_NSR(model, ecg_cycles, threshold=3):
-    test_dataset = ECGDataset(ecg_cycles)
-    test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
-
-    model.eval()
-    # true_labels = []
-    # predictions, losses = [], []
-    sinus_rhythm, not_sinus_rhythm = [], []
-    criterion = nn.L1Loss(reduction='sum').to(device)
-
-    with torch.no_grad():
-        for inputs, _ in test_loader:
-            inputs = inputs.reshape(-1, config.feature_size)
-            inputs = inputs.to(device)
-            # labels = labels.to(device)
-            outputs = model(inputs)
-            # true_labels += list(labels.reshape(-1))
-            loss = criterion(outputs, inputs)
-
-            if inputs.is_cuda:
-                inputs = np.array(inputs.cpu())
-            if loss < threshold:
-                sinus_rhythm.append(inputs.reshape(-1))
-                # predictions.append(0.0)
-            else:
-                not_sinus_rhythm.append(inputs.reshape(-1))
-                # predictions.append(1.0)
-
-    # print(classification_report(true_labels, predictions))
-
-    return sinus_rhythm, not_sinus_rhythm
-
-# Predict whether a cycle is SR or NSR from the reconstruction loss
-def autoencoder_predict(model, ecg_cycles, ecg_labels, threshold=3):
-    test_dataset = ECGDataset(ecg_cycles, ecg_labels)
-    test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
-
-    model.eval()
-    true_labels = []
-    predictions, losses = [], []
-    # sinus_rhythm, not_sinus_rhythm = [], []
-    criterion = nn.L1Loss(reduction='sum').to(device)
-
-    with torch.no_grad():
-        for inputs, labels in test_loader:
-            inputs = inputs.reshape(-1, config.feature_size)
-            inputs = inputs.to(device)
-            # labels = labels.to(device)
-            outputs = model(inputs)
-            true_labels += list(labels.reshape(-1))
-
-            loss = criterion(outputs, inputs)
-            if loss < threshold:
-                # sinus_rhythm.append(inputs.reshape(-1))
-                predictions.append(0.0)
-            else:
-                # not_sinus_rhythm.append(inputs.reshape(-1))
-                predictions.append(1.0)
-
-    print(classification_report(true_labels, predictions))
-    save_confusion_matrix(true_labels, predictions, "autoencoder_conf.png")
-    # return sinus_rhythm, not_sinus_rhythm
 
 
 
@@ -351,8 +131,6 @@ def load_dataset(data_directory):
     sinus_rhythm_count = 0
     sole_SR = 0
     not_sole_SR = 0
-    total_samples = 0
-    total_cycles = 0
     record_labels = []
     cyc_in_recording_counts = []
 
@@ -364,7 +142,7 @@ def load_dataset(data_directory):
         header_file = header_files[idx]
         recording_file = recording_files[idx]
         header = load_header(header_file)
-        recording = load_recording(recording_file, header, ('II'))
+        recording = load_recording(recording_file, header, ('I'))
 
         # Extract information from header
         id = get_recording_id(header)
@@ -381,11 +159,11 @@ def load_dataset(data_directory):
         frequency = get_frequency(header)
 
         # # Process ECG and extract features
-        features, cnt , undersized_list, cyc_in_recording_count, sample_count = process_ecg(recording, frequency, id)
+        features, cnt , undersized_list, cyc_in_recording_count = process_ecg(recording, frequency, id)
         cyc_in_recording_counts.append(cyc_in_recording_count)
 
-        # if undersized_list:
-        #     undersized_list_count += 1
+        if undersized_list:
+            undersized_list_count += 1
 
         end_time = time.time()
         time_interval = end_time-start_time
@@ -396,9 +174,6 @@ def load_dataset(data_directory):
         error_cnt += cnt
 
         if not undersized_list:
-            total_samples += sample_count
-            total_cycles += cyc_in_recording_count
-
             aggregated_features.append(features)
             record_labels.append(labels)
             if '426783006' in labels:
@@ -416,7 +191,6 @@ def load_dataset(data_directory):
         #     aggregated_features.append(features[i])
         #     aggregated_labels.append(label_vector)
     print(f"Sole SR: {sole_SR}, Not sole SR: {not_sole_SR}")
-    print(f"Total cycles: ")
     plot_ecg_cycles_histogram(cyc_in_recording_counts)
 
     # aggregated_features = np.array(aggregated_features)
@@ -433,37 +207,34 @@ def load_dataset(data_directory):
 
     print(f"Zero count = {zero_count}, One count = {one_count}")
     print("error_cnt: ", error_cnt)
-    print("Samples per cycle: ", float(total_samples)/total_cycles)
+
 
     return aggregated_features, aggregated_labels, record_labels, time_spent, error_cnt, scored_indices
 
 
-def train_model(model, train_loader, weight, num_epochs, save_path):
+def train_model(model, train_loader, num_epochs, save_path):
 
-    optimizer = optim.Adam(model.parameters(), lr=2e-5)
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
 
     # Training loop
     for epoch in range(num_epochs):  # num_epochs should be defined
         model.train()
-        losses = []
         for i, (inputs, labels) in enumerate(train_loader):
             optimizer.zero_grad()
             inputs = inputs.reshape(-1, config.feature_size)
             # print("Training inputs: ", str(inputs))
             inputs = inputs.to(device)
             labels = labels.to(device)
-            weight = weight.to(device)
             #print("Input shape: ", inputs.shape)
             outputs = model(inputs)
             #print("NEW LOSS FN")
             # change the loss function
             # loss = custom_weighted_loss(outputs, labels, scored_indices)
-            criterion = nn.BCEWithLogitsLoss(pos_weight=weight)
+            criterion = nn.BCEWithLogitsLoss()
             loss = criterion(outputs, labels)
-            losses.append(loss.item())
             loss.backward()
             optimizer.step()
-        print(f'Epoch: {epoch}; Loss: {mean(losses)}')
+        print(f'Epoch: {epoch}; Loss: {loss}')
     torch.save(model.state_dict(), save_path)            
 
 def train_autoencoder_model(model, train_loader, num_epochs, save_path):
@@ -487,7 +258,7 @@ def train_autoencoder_model(model, train_loader, num_epochs, save_path):
             optimizer.step()
             train_losses.append(loss.item())
         print(f'Epoch: {epoch}; Loss: {mean(train_losses)}')
-        print(f"Loss 99.9999th: {np.percentile(train_losses, 99.9999)}, 99.999th: {np.percentile(train_losses, 99.999)}, 99.99th: {np.percentile(train_losses, 99.99)}, 99.9th: {np.percentile(train_losses, 99.9)}, 99.5th: {np.percentile(train_losses, 99.5)}, 99th: {np.percentile(train_losses, 99)}, 97th: {np.percentile(train_losses, 97)}, 95th: {np.percentile(train_losses, 95)}, 90th: {np.percentile(train_losses, 90)}, 85th: {np.percentile(train_losses, 85)}, 75th: {np.percentile(train_losses, 75)}, 50th: {np.percentile(train_losses, 50)}")
+        print(f"Loss 99.9999th: {np.percentile(train_losses, 99.9999)}, 99.999th: {np.percentile(train_losses, 99.999)}, 99.99th: {np.percentile(train_losses, 99.99)}, 99th: {np.percentile(train_losses, 99)}, 95th: {np.percentile(train_losses, 95)}, 90th: {np.percentile(train_losses, 90)}, 85th: {np.percentile(train_losses, 85)}, 75th: {np.percentile(train_losses, 75)}, 50th: {np.percentile(train_losses, 50)}")
         plot_autoencoder_losses(train_losses, epoch, f"autoenconder_trainloss{epoch}.png")
 
     torch.save(model.state_dict(), save_path)
@@ -495,7 +266,7 @@ def train_autoencoder_model(model, train_loader, num_epochs, save_path):
     test_autoencoder_model(model, train_loader, -1)
 
 
-def test_model(model, test_loader, fold, scored_indices=None):
+def test_model(model, test_loader, scored_indices):
     # Prediction and Evaluation
     start_time = time.time()
     model.eval()
@@ -522,7 +293,7 @@ def test_model(model, test_loader, fold, scored_indices=None):
             # labels = labels.numpy()
 
             #print("\n\nOutputs in test: ", outputs)
-            # print("Labels in test: ", labels)
+            print("Labels in test: ", labels)
 
             for _, output in enumerate(outputs):
                 if output >= 0.5:
@@ -535,7 +306,7 @@ def test_model(model, test_loader, fold, scored_indices=None):
     end_time = time.time()
 
     # y_pred = list(np.array(y_pred).reshape(-1))
-    # print("y_pred in test: ", y_pred)
+    print("y_pred in test: ", y_pred)
     # y_test = list(np.array(labels).reshape(-1))
 
     # Calculate average time spent per batch
@@ -547,8 +318,6 @@ def test_model(model, test_loader, fold, scored_indices=None):
     print(f"Size of pred: {len(y_pred)}, size of test: {len(y_test)}")
 
     print(classification_report(y_test, y_pred))
-    save_confusion_matrix(y_test, y_pred, "cnnlstm_conf.png")
-    # save_confusion_matrix(y_test, y_pred, "")
     # evaluate_model(y_test=y_test, y_pred=y_pred, y_pred_prob=None, scored_indices=scored_indices)
 
 def test_autoencoder_model(model, test_loader, fold=0):
@@ -557,24 +326,23 @@ def test_autoencoder_model(model, test_loader, fold=0):
     criterion = nn.L1Loss(reduction='sum').to(device)
 
     with torch.no_grad():
-        for inputs, _ in test_loader:
+        for inputs, labels in test_loader:
             inputs = inputs.reshape(-1, config.feature_size)
             inputs = inputs.to(device)
-            # labels = labels.to(device)
+            labels = labels.to(device)
             outputs = model(inputs)
 
-            # if outputs.is_cuda:
-            #     outputs = outputs.cpu()
+            if outputs.is_cuda:
+                outputs = outputs.cpu()
 
-            # if labels.is_cuda:
-            #     labels = labels.cpu()
+            if labels.is_cuda:
+                labels = labels.cpu()
 
-            loss = criterion(outputs, inputs)
-            # predictions.append(outputs.numpy().flatten())
+            loss = criterion(outputs, labels)
+            predictions.append(outputs.numpy().flatten())
             losses.append(loss.item())
 
-    # print(f"Losses length: {len(losses)}, Losses: {losses}")
-    print(f"Loss 99.9999th: {np.percentile(losses, 99.9999)}, 99.999th: {np.percentile(losses, 99.999)}, 99.99th: {np.percentile(losses, 99.99)}, 99.9th: {np.percentile(losses, 99.9)}, 99.5th: {np.percentile(losses, 99.5)}, 99th: {np.percentile(losses, 99)}, 97th: {np.percentile(losses, 97)}, 95th: {np.percentile(losses, 95)}, 90th: {np.percentile(losses, 90)}, 85th: {np.percentile(losses, 85)}, 75th: {np.percentile(losses, 75)}, 50th: {np.percentile(losses, 50)}")
+    print(f"Loss 99.9999th: {np.percentile(losses, 99.9999)}, 99.999th: {np.percentile(losses, 99.999)}, 99.99th: {np.percentile(losses, 99.99)}, 99th: {np.percentile(losses, 99)}, 95th: {np.percentile(losses, 95)}, 90th: {np.percentile(losses, 90)}, 85th: {np.percentile(losses, 85)}, 75th: {np.percentile(losses, 75)}, 50th: {np.percentile(losses, 50)}")
     plot_autoencoder_losses(losses, fold)
 
 
@@ -717,24 +485,150 @@ def main(data_directory,
     aggregated_features, aggregated_labels, record_labels, time_spent, error_cnt, scored_indices = load_dataset(data_directory)
     aggregated_features, aggregated_labels, clear_NSR_features, unclear_NSR_features, restruct_time = split_records_per_cycle(aggregated_features, record_labels)
 
+
+
+    # Autoencoder cross validation: MOVE INSIDE A FN TO GENERALIZE IT FOR DIFFERENT MODELS
+    # for train_index, test_index in kf.split(clear_NSR_features):
+
+    # exp_logger.print(f"Starting Fold {fold}")
+    # X_train, X_test, y_train, y_test = train_test_split(aggregated_features, aggregated_labels, test_size=0.5, random_state=1234+idx)
+    X_train, X_test = clear_NSR_features, unclear_NSR_features
+    # y_train, y_test = aggregated_labels[train_index], aggregated_labels[test_index]
+
+    # Create custom datasets
+    train_dataset = ECGDataset(X_train)
+    test_dataset = ECGDataset(X_test)
+
+    # Create data loaders
+    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+    test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
+
+    # Initialize the model
+    autoencoder_model = RecurrentAutoencoder(config.feature_size, config.autoencoder_embedding_size).to(device)
+    # student_model = CNNLSTM1DWithAttentionStudent(num_classes=129).to(device)
+
+    # exp_logger.print("Training the teacher model...")
+    # print("Training the autoencoder model")
+    model_path = f'{model_directory}/autoencoder_model.pth'
+    # train_autoencoder_model(autoencoder_model, train_loader, 500, model_path)
+
+    # # Load the saved model state into the teacher_model instance
+    autoencoder_model.load_state_dict(torch.load(model_path, map_location=device))
+
+    exp_logger.print("Testing the autoencoder model...")
+    # testing the autoencoder on the test set again
+    test_autoencoder_model(autoencoder_model, train_loader)
+    # Save the teacher model's state
+    torch.save(autoencoder_model.state_dict(), model_path)
+
+    # fold += 1
+
+    print("EXITING AFTER TRAINING AUTOENCODER")
+    exit(0)
+
+    # Oversampling the minority class using SMOTE to make up for the class imbalance
+    smote = SMOTE(random_state=42)
+    aggregated_features, aggregated_labels = smote.fit_resample(aggregated_features, aggregated_labels)
+    # smote_fit_resample appears to change the input from 2d to 1d, changing it back here
+    aggregated_labels = aggregated_labels.reshape(-1, 1)
+    # Shuffle the dataset
+    dataset = np.column_stack((aggregated_features, aggregated_labels))
+    np.random.shuffle(dataset)
+
+    aggregated_features, aggregated_labels = dataset[:, :-1],  dataset[:, -1]
+    aggregated_labels = aggregated_labels.reshape(-1, 1)
+
+    np.save('npy/aggregated_features.npy', aggregated_features)
+    np.save('npy/aggregated_labels.npy', aggregated_labels)
+    np.save('npy/scored_indices.npy', scored_indices)
     exp_logger.print(f"Number of Errors for R-Peak Extraction: {error_cnt}")
     exp_logger.print(f"Time spent on processing each data is {np.mean(time_spent)}s")
-    # autoencoder_model, autoencoder_model_path = sinus_rhythm_autoencoder(clear_NSR_features, unclear_NSR_features, model_directory)
 
-    autoencoder_model = RecurrentAutoencoder(config.feature_size, config.autoencoder_embedding_size).to(device)
-    autoencoder_model.load_state_dict(torch.load(f'{model_directory}/autoencoder_model200feat_lead2.pth', map_location=device))
-    more_SR, more_not_SR = classify_unclear_NSR(autoencoder_model, unclear_NSR_features)
-    print(f"No. of new SR: {len(more_SR)},  no. of new not SR: {len(more_not_SR)}")
+    aggregated_features = np.load('npy/aggregated_features.npy', allow_pickle=True)
+    aggregated_labels = np.load('npy/aggregated_labels.npy', allow_pickle=True)
+    scored_indices = np.load('npy/scored_indices.npy', allow_pickle=True)
 
-    # updating the dataset using the newly analysed data (the uncertain NSR cycles)
-    aggregated_features = np.array(list(aggregated_features) + more_SR + more_not_SR)
-    aggregated_labels = np.array(list(aggregated_labels) + [0.0]*len(more_SR) + [1.0]*len(more_not_SR))
+    # Cross-validation
+    kf = KFold(n_splits=5, shuffle=True, random_state=42)
 
-    # print("Testing the autoencoder on the entire dataset")
-    # autoencoder_predict(autoencoder_model, aggregated_features, aggregated_labels)
+    iteration = 5
+    fold = 1
+    one_count = 0
+    zero_count = 0
 
-    train_and_cross_validate_classifier(aggregated_features, aggregated_labels, num_epochs)
+    # Model training
+    for train_index, test_index in kf.split(aggregated_features):
+
+        exp_logger.print(f"Starting Fold {fold}")
+        # X_train, X_test, y_train, y_test = train_test_split(aggregated_features, aggregated_labels, test_size=0.5, random_state=1234+idx)
+        X_train, X_test = aggregated_features[train_index], aggregated_features[test_index]
+        y_train, y_test = aggregated_labels[train_index], aggregated_labels[test_index]
+
+        for item in y_train:
+            if float(item) == 1.0:
+                one_count += 1
+            else:
+                zero_count += 1
+
+        # # Convert to PyTorch tensors
+        # X_train_tensor = torch.tensor(X_train, dtype=torch.float32)
+        # y_train_tensor = torch.tensor(y_train, dtype=torch.float32)
+        # X_test_tensor = torch.tensor(X_test, dtype=torch.float32)
+        # y_test_tensor = torch.tensor(y_test, dtype=torch.float32)
+
+        # Create custom datasets
+        train_dataset = ECGDataset(X_train, y_train)
+        test_dataset = ECGDataset(X_test, y_test)
+
+        # Create data loaders
+        train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+        test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
+
+        # Initialize the model
+        teacher_model = CNNLSTM1DWithAttentionTeacher().to(device)
+        # student_model = CNNLSTM1DWithAttentionStudent(num_classes=129).to(device)
+
+        # exp_logger.print("Training the teacher model...")
+        print("Training the teacher model")
+        model_path = f'{model_directory}/time_ecg.pth'
+        train_model(teacher_model, train_loader, num_epochs, model_path)
+
+        # # Load the saved model state into the teacher_model instance
+        teacher_model.load_state_dict(torch.load(model_path, map_location=device))
+
+        exp_logger.print("Testing the teacher model...")
+        test_model(teacher_model, test_loader, scored_indices)
+        # Save the teacher model's state
+        torch.save(teacher_model.state_dict(), model_path)
+
+
+
+        # Prepare for knowledge distillation
+        # exp_logger.print("Training the student model with knowledge distillation...")
+        # train_student_model_with_distillation(teacher_model,
+        #                                         student_model,
+        #                                         train_loader,
+        #                                         device,
+        #                                         num_epochs=num_epochs,
+        #                                         temperature=2.0,
+        #                                         alpha=0.5,
+        #                                         weights=weights,
+        #                                         scored_indices=scored_indices)
+
+        # exp_logger.print("Testing the student model...")
+        # model_path = f'{model_directory}/student_model.pth'
+
+        # # Load the saved model state into the teacher_model instance
+        # student_model.load_state_dict(torch.load(model_path, map_location=device))
+        # test_model(student_model, test_loader, scored_indices)
+        # # Optionally save the student model's state
+        # torch.save(student_model.state_dict(), f'{model_directory}/student_model.pth')
+
+
+        fold += 1
     
+    print(f"One count: {one_count}, Zero count: {zero_count}")
+
 
 
 
@@ -744,5 +638,5 @@ model_directory = '..'
 
 main(data_directory,
      model_directory,
-     num_epochs=20,
+     num_epochs=40,
      is_test=False)
