@@ -50,13 +50,19 @@ map_class = [['733534002', '164909002'],
 map1_class = ['733534002', '713427006', '284470004', '427172004']
 map2_class = ['164909002', '59118001', '63593006', '17338001']
 
-
-def train_and_cross_validate_classifier(aggregated_features, aggregated_labels, num_epochs):
+# Combining the ENN undersampling and SMOTE oversampling methods to account for the class imbalance
+def adjust_class_imbalance(aggregated_features, aggregated_labels):
     # Combining undersampling the majority and applying SMOTE on the minority to make up for the class imbalance 
-    # print("SMOTE-ENN")
-    # start_time = time.time()
-    # smote_enn = SMOTEENN(enn=EditedNearestNeighbours(sampling_strategy='majority'))
-    # print("Time taken for SMOTE-ENN: ", time.time() - start_time)
+    # unique, counts = np.unique(aggregated_labels, return_counts=True)
+    # class_counts = dict(zip(unique, counts))
+    # minority_class, majority_class = min(class_counts, key=class_counts.get), max(class_counts, key=class_counts.get)
+    # minority_class_count = class_counts[minority_class]
+    # sampling_ratio = {minority_class: minority_class_count}
+    print("SMOTE-ENN")
+    start_time = time.time()
+    smote_enn = SMOTEENN(sampling_strategy='auto')
+    aggregated_features, aggregated_labels = smote_enn.fit_resample(aggregated_features, aggregated_labels)
+    print("Time taken for SMOTE-ENN: ", time.time() - start_time)
     # print_class_distribution("Before OSS: ", aggregated_labels)    
     # oss = OneSidedSelection(n_neighbors=3, sampling_strategy='majority')
     # aggregated_features, aggregated_labels = oss.fit_resample(aggregated_features, aggregated_labels)
@@ -68,26 +74,31 @@ def train_and_cross_validate_classifier(aggregated_features, aggregated_labels, 
     # rus = RandomUnderSampler(random_state=42)
     # aggregated_features, aggregated_labels = rus.fit_resample(aggregated_features, aggregated_labels)
     # print_class_distribution("After RUS: ", aggregated_labels)
-    aggregated_labels = aggregated_labels.reshape(-1, 1)
-    # Shuffle the dataset
-    dataset = np.column_stack((aggregated_features, aggregated_labels))
-    np.random.shuffle(dataset)
+    return aggregated_features, aggregated_labels
 
-    aggregated_features, aggregated_labels = dataset[:, :-1],  dataset[:, -1]
-    aggregated_labels = aggregated_labels.reshape(-1, 1)
+def train_and_cross_validate_classifier(aggregated_features, aggregated_labels, num_epochs):
+    
+    if (aggregated_features is not None) and (aggregated_labels is not None):
+        aggregated_features, aggregated_labels = adjust_class_imbalance(aggregated_features, aggregated_labels)
+        aggregated_labels = aggregated_labels.reshape(-1, 1)
+        # Shuffle the dataset
+        dataset = np.column_stack((aggregated_features, aggregated_labels))
+        np.random.shuffle(dataset)
 
-    np.save('npy/aggregated_features.npy', aggregated_features)
-    np.save('npy/aggregated_labels.npy', aggregated_labels)
-    # np.save('npy/scored_indices.npy', scored_indices)
+        aggregated_features, aggregated_labels = dataset[:, :-1],  dataset[:, -1]
+        aggregated_labels = aggregated_labels.reshape(-1, 1)
 
-    aggregated_features = np.load('npy/aggregated_features.npy', allow_pickle=True)
-    aggregated_labels = np.load('npy/aggregated_labels.npy', allow_pickle=True)
-    # scored_indices = np.load('npy/scored_indices.npy', allow_pickle=True)
+        np.save('npy/aggregated_features.npy', aggregated_features)
+        np.save('npy/aggregated_labels.npy', aggregated_labels)
+
+    if (aggregated_features is None) and (aggregated_labels is None):
+        aggregated_features = np.load('npy/aggregated_features.npy', allow_pickle=True)
+        aggregated_labels = np.load('npy/aggregated_labels.npy', allow_pickle=True)
+        # aggregated_features, aggregated_labels = adjust_class_imbalance(aggregated_features, aggregated_labels)
+        print("Aggregated labels shape: ", aggregated_labels.shape)
 
     # Cross-validation
     kf = KFold(n_splits=5, shuffle=True, random_state=42)
-
-    iteration = 5
     fold = 1
     # Model training
     for train_index, test_index in kf.split(aggregated_features):
@@ -105,13 +116,8 @@ def train_and_cross_validate_classifier(aggregated_features, aggregated_labels, 
                 zero_count += 1
 
         # weight = torch.tensor([float(len(y_train))/(2*one_count)], dtype=torch.float32)
-        weight = torch.tensor([float(zero_count)/len(y_train)], dtype=torch.float32)
+        weight = torch.tensor([float(zero_count)/one_count], dtype=torch.float32)
         print("Pos weight: ", weight)
-        # # Convert to PyTorch tensors
-        # X_train_tensor = torch.tensor(X_train, dtype=torch.float32)
-        # y_train_tensor = torch.tensor(y_train, dtype=torch.float32)
-        # X_test_tensor = torch.tensor(X_test, dtype=torch.float32)
-        # y_test_tensor = torch.tensor(y_test, dtype=torch.float32)
 
         # Create custom datasets
         train_dataset = ECGDataset(X_train, y_train)
@@ -292,6 +298,7 @@ def autoencoder_predict(model, ecg_cycles, ecg_labels, threshold=3):
 
     with torch.no_grad():
         for inputs, labels in test_loader:
+            # print("Input shape in autoencoder predict: ", inputs.shape)
             inputs = inputs.reshape(-1, config.feature_size)
             inputs = inputs.to(device)
             # labels = labels.to(device)
@@ -729,6 +736,9 @@ def main(data_directory,
     # updating the dataset using the newly analysed data (the uncertain NSR cycles)
     aggregated_features = np.array(list(aggregated_features) + more_SR + more_not_SR)
     aggregated_labels = np.array(list(aggregated_labels) + [0.0]*len(more_SR) + [1.0]*len(more_not_SR))
+
+    # aggregated_features = np.array(list(aggregated_features) + list(unclear_NSR_features))
+    # aggregated_labels = np.array(list(aggregated_labels) + [1.0]*len(unclear_NSR_features))
 
     # print("Testing the autoencoder on the entire dataset")
     # autoencoder_predict(autoencoder_model, aggregated_features, aggregated_labels)
