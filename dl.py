@@ -1,5 +1,5 @@
 import numpy as np
-import os, time
+import os, time, sys
 from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
@@ -11,7 +11,7 @@ from joblib import dump, load
 from sklearn.preprocessing import LabelEncoder
 from imblearn.over_sampling import SMOTE
 from imblearn.under_sampling import EditedNearestNeighbours, OneSidedSelection, RandomUnderSampler
-from imblearn.combine import SMOTEENN
+from imblearn.combine import SMOTEENN, SMOTETomek
 from collections import Counter
 from sklearn.model_selection import KFold, GridSearchCV
 import torch.nn.functional as F
@@ -58,9 +58,10 @@ def adjust_class_imbalance(aggregated_features, aggregated_labels):
     # minority_class, majority_class = min(class_counts, key=class_counts.get), max(class_counts, key=class_counts.get)
     # minority_class_count = class_counts[minority_class]
     # sampling_ratio = {minority_class: minority_class_count}
-    print("SMOTE-ENN")
+    print("SMOTE-Tomek:")
     start_time = time.time()
-    smote_enn = SMOTEENN(sampling_strategy='auto')
+    smote_enn = SMOTETomek(sampling_strategy='auto')
+    prev_features, pref_labels = aggregated_features, aggregated_labels
     aggregated_features, aggregated_labels = smote_enn.fit_resample(aggregated_features, aggregated_labels)
     print("Time taken for SMOTE-ENN: ", time.time() - start_time)
     # print_class_distribution("Before OSS: ", aggregated_labels)    
@@ -73,13 +74,18 @@ def adjust_class_imbalance(aggregated_features, aggregated_labels):
     # smote_fit_resample appears to change the input from 2d to 1d, changing it back here
     # rus = RandomUnderSampler(random_state=42)
     # aggregated_features, aggregated_labels = rus.fit_resample(aggregated_features, aggregated_labels)
+    # non_selected_indices = np.setdiff1d(np.arange(len(X)), tl.sample_indices_)
+
+    unique_labels, counts = np.unique(aggregated_labels, return_counts=True)
+    for label, count in zip(unique_labels, counts):
+        print(f"Label {label}: {count} occurrences")
     # print_class_distribution("After RUS: ", aggregated_labels)
-    return aggregated_features, aggregated_labels
+    return aggregated_features, aggregated_labels.reshape(-1,1)
 
 def train_and_cross_validate_classifier(aggregated_features, aggregated_labels, num_epochs):
     
     if (aggregated_features is not None) and (aggregated_labels is not None):
-        aggregated_features, aggregated_labels = adjust_class_imbalance(aggregated_features, aggregated_labels)
+        # aggregated_features, aggregated_labels = adjust_class_imbalance(aggregated_features, aggregated_labels)
         aggregated_labels = aggregated_labels.reshape(-1, 1)
         # Shuffle the dataset
         dataset = np.column_stack((aggregated_features, aggregated_labels))
@@ -109,6 +115,8 @@ def train_and_cross_validate_classifier(aggregated_features, aggregated_labels, 
         X_train, X_test = aggregated_features[train_index], aggregated_features[test_index]
         y_train, y_test = aggregated_labels[train_index], aggregated_labels[test_index]
 
+        X_train, y_train = adjust_class_imbalance(X_train, y_train)
+
         for item in y_train:
             if float(item) == 1.0:
                 one_count += 1
@@ -116,8 +124,8 @@ def train_and_cross_validate_classifier(aggregated_features, aggregated_labels, 
                 zero_count += 1
 
         # weight = torch.tensor([float(len(y_train))/(2*one_count)], dtype=torch.float32)
-        weight = torch.tensor([float(zero_count)/one_count], dtype=torch.float32)
-        print("Pos weight: ", weight)
+        pos_weight = torch.tensor([float(zero_count)/one_count], dtype=torch.float32)
+        print("Pos weight: ", pos_weight)
 
         # Create custom datasets
         train_dataset = ECGDataset(X_train, y_train)
@@ -129,12 +137,10 @@ def train_and_cross_validate_classifier(aggregated_features, aggregated_labels, 
 
         # Initialize the model
         teacher_model = CNNLSTM1DWithAttentionTeacher().to(device)
-        # student_model = CNNLSTM1DWithAttentionStudent(num_classes=129).to(device)
 
-        # exp_logger.print("Training the teacher model...")
         print("Training the teacher model")
         model_path = f'{model_directory}/time_ecg{fold}_lead2.pth'
-        train_model(teacher_model, train_loader, weight, num_epochs, model_path)
+        train_model(teacher_model, train_loader, pos_weight, num_epochs, model_path)
 
         # # Load the saved model state into the teacher_model instance
         teacher_model.load_state_dict(torch.load(model_path, map_location=device))
@@ -143,30 +149,6 @@ def train_and_cross_validate_classifier(aggregated_features, aggregated_labels, 
         test_model(teacher_model, test_loader, fold)
         # Save the teacher model's state
         torch.save(teacher_model.state_dict(), model_path)
-
-
-
-        # Prepare for knowledge distillation
-        # exp_logger.print("Training the student model with knowledge distillation...")
-        # train_student_model_with_distillation(teacher_model,
-        #                                         student_model,
-        #                                         train_loader,
-        #                                         device,
-        #                                         num_epochs=num_epochs,
-        #                                         temperature=2.0,
-        #                                         alpha=0.5,
-        #                                         weights=weights,
-        #                                         scored_indices=scored_indices)
-
-        # exp_logger.print("Testing the student model...")
-        # model_path = f'{model_directory}/student_model.pth'
-
-        # # Load the saved model state into the teacher_model instance
-        # student_model.load_state_dict(torch.load(model_path, map_location=device))
-        # test_model(student_model, test_loader, scored_indices)
-        # # Optionally save the student model's state
-        # torch.save(student_model.state_dict(), f'{model_directory}/student_model.pth')
-
 
         fold += 1
 
@@ -721,27 +703,34 @@ def main(data_directory,
     exp_logger.print(f"=========================")
     # exp_logger.print(f"Process Denoised Technique: {noise} and R-Peak Detection: {peak}")
 
-    aggregated_features, aggregated_labels, record_labels, time_spent, error_cnt, scored_indices = load_dataset(data_directory)
-    aggregated_features, aggregated_labels, clear_NSR_features, unclear_NSR_features, restruct_time = split_records_per_cycle(aggregated_features, record_labels)
+    if len(sys.argv) == 1:
+        aggregated_features, aggregated_labels, record_labels, time_spent, error_cnt, scored_indices = load_dataset(data_directory)
+        aggregated_features, aggregated_labels, clear_NSR_features, unclear_NSR_features, restruct_time = split_records_per_cycle(aggregated_features, record_labels)
 
-    exp_logger.print(f"Number of Errors for R-Peak Extraction: {error_cnt}")
-    exp_logger.print(f"Time spent on processing each data is {np.mean(time_spent)}s")
-    # autoencoder_model, autoencoder_model_path = sinus_rhythm_autoencoder(clear_NSR_features, unclear_NSR_features, model_directory)
+        exp_logger.print(f"Number of Errors for R-Peak Extraction: {error_cnt}")
+        exp_logger.print(f"Time spent on processing each data is {np.mean(time_spent)}s")
+        # autoencoder_model, autoencoder_model_path = sinus_rhythm_autoencoder(clear_NSR_features, unclear_NSR_features, model_directory)
 
-    autoencoder_model = RecurrentAutoencoder(config.feature_size, config.autoencoder_embedding_size).to(device)
-    autoencoder_model.load_state_dict(torch.load(f'{model_directory}/autoencoder_model200feat_lead2.pth', map_location=device))
-    more_SR, more_not_SR = classify_unclear_NSR(autoencoder_model, unclear_NSR_features)
-    print(f"No. of new SR: {len(more_SR)},  no. of new not SR: {len(more_not_SR)}")
+        autoencoder_model = RecurrentAutoencoder(config.feature_size, config.autoencoder_embedding_size).to(device)
+        autoencoder_model.load_state_dict(torch.load(f'{model_directory}/autoencoder_model200feat_lead2.pth', map_location=device))
+        more_SR, more_not_SR = classify_unclear_NSR(autoencoder_model, unclear_NSR_features)
+        print(f"No. of new SR: {len(more_SR)},  no. of new not SR: {len(more_not_SR)}")
 
-    # updating the dataset using the newly analysed data (the uncertain NSR cycles)
-    aggregated_features = np.array(list(aggregated_features) + more_SR + more_not_SR)
-    aggregated_labels = np.array(list(aggregated_labels) + [0.0]*len(more_SR) + [1.0]*len(more_not_SR))
+        # updating the dataset using the newly analysed data (the uncertain NSR cycles)
+        aggregated_features = np.array(list(aggregated_features) + more_SR + more_not_SR)
+        aggregated_labels = np.array(list(aggregated_labels) + [0.0]*len(more_SR) + [1.0]*len(more_not_SR))
 
-    # aggregated_features = np.array(list(aggregated_features) + list(unclear_NSR_features))
-    # aggregated_labels = np.array(list(aggregated_labels) + [1.0]*len(unclear_NSR_features))
+        # aggregated_features = np.array(list(aggregated_features) + list(unclear_NSR_features))
+        # aggregated_labels = np.array(list(aggregated_labels) + [1.0]*len(unclear_NSR_features))
 
-    # print("Testing the autoencoder on the entire dataset")
-    # autoencoder_predict(autoencoder_model, aggregated_features, aggregated_labels)
+        # print("Testing the autoencoder on the entire dataset")
+        # autoencoder_predict(autoencoder_model, aggregated_features, aggregated_labels)
+    elif sys.argv[1] == "prev":
+        # If 'aggregated_features' and 'aggregated_labels' are None, they are loaded from the /npy folder
+        aggregated_features, aggregated_labels = None, None
+    else:
+        print("Did you mean to use previously stored features?")
+        print("If yes, the first argument has to be 'prev'. If not, do not pass an argument.")
 
     train_and_cross_validate_classifier(aggregated_features, aggregated_labels, num_epochs)
     
